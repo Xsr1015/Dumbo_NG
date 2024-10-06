@@ -20,6 +20,11 @@ type Core struct {
 	Elector    *Elector
 	Commitor   *Committor
 
+	Height       int64                 //the height of block, height++, then create block, the height of the first block is 1
+	CurrentCert  map[core.NodeID]int64 //map from sender to height
+	OrderedCert  map[core.NodeID]int64
+	BlockHashMap map[core.NodeID]map[int64]crypto.Digest //map from NodeID to height to blockHash
+
 	FinishFlags  map[int64]map[int64]map[core.NodeID]crypto.Digest // finish? map[epoch][round][node] = blockHash
 	SPbInstances map[int64]map[int64]map[core.NodeID]*SPB          // map[epoch][node][round]
 	DoneFlags    map[int64]map[int64]struct{}
@@ -48,6 +53,8 @@ func NewCore(
 		TxPool:       TxPool,
 		Transimtor:   Transimtor,
 		Epoch:        0,
+		Height:       0,
+		BlockHashMap: make(map[core.NodeID]map[int64]crypto.Digest),
 		Aggreator:    NewAggreator(Committee),
 		Elector:      NewElector(SigService, Committee),
 		Commitor:     NewCommittor(callBack),
@@ -57,8 +64,18 @@ func NewCore(
 		ReadyFlags:   make(map[int64]map[int64]struct{}),
 		HaltFlags:    make(map[int64]struct{}),
 	}
+	c.initCert()
 
 	return c
+}
+
+func (c *Core) initCert() {
+	c.OrderedCert = make(map[core.NodeID]int64) //map from sender to height
+	c.CurrentCert = make(map[core.NodeID]int64) //map from sender to height
+	for id, _ := range c.Committee.Authorities {
+		c.CurrentCert[id] = 0
+		c.OrderedCert[id] = 0
+	}
 }
 
 func (c *Core) messgaeFilter(epoch int64) bool {
@@ -145,12 +162,66 @@ func (c *Core) hasDone(epoch, round int64) bool {
 	}
 }
 
-func (c *Core) generatorBlock(epoch int64) *Block {
-	block := NewBlock(c.Name, c.TxPool.GetBatch(), epoch)
+func (c *Core) generatorBlock(height int64, preHash crypto.Digest) *Block {
+	block := NewBlock(c.Name, c.TxPool.GetBatch(), height, preHash)
 	if block.Batch.ID != -1 {
-		logger.Info.Printf("create Block epoch %d node %d batch_id %d \n", block.Epoch, block.Proposer, block.Batch.ID)
+		logger.Info.Printf("create Block height %d node %d batch_id %d \n", block.Height, block.Proposer, block.Batch.ID)
 	}
 	return block
+}
+
+/*********************************** Broadcast Block Start***************************************/
+func (c *Core) PbBroadcastBlock(preHash crypto.Digest) error {
+	c.Height++
+	logger.Debug.Printf("Broadcast Block node %d height %d\n", c.Name, c.Height)
+	block := c.generatorBlock(c.Height, preHash)
+	bm, _ := NewBlockMessage(c.Name, block, c.Height, c.SigService)
+	c.Transimtor.Send(c.Name, core.NONE, bm)
+	c.Transimtor.RecvChannel() <- bm
+	return nil
+}
+
+func (c *Core) handleBlockMessage(bm *BlockMessage) error {
+	logger.Debug.Printf("Processing BlockMessage proposer %d height %d\n", bm.Author, bm.Height)
+
+	c.CurrentCert[bm.Author] = bm.Height - 1
+	if _, ok := c.BlockHashMap[bm.Author]; !ok {
+		c.BlockHashMap[bm.Author] = make(map[int64]crypto.Digest)
+	}
+	c.BlockHashMap[bm.Author][bm.Height] = bm.B.Hash()
+	if err := c.storeBlock(bm.B); err != nil {
+		logger.Error.Printf("Store Block error: %v\n", err)
+		return err
+	}
+	go c.PbSendVote(bm.Author, bm.Height, bm.B.Hash())
+	return nil
+}
+
+func (c *Core) PbSendVote(to core.NodeID, height int64, blockHash crypto.Digest) error {
+	vote, _ := NewVoteforBlock(c.Name, blockHash, height, c.SigService)
+	c.Transimtor.Send(c.Name, to, vote)
+	return nil
+}
+
+func (c *Core) handleVoteForBlock(v *VoteforBlock) error {
+	logger.Debug.Printf("Processing VoteforBlock proposer %d height %d\n", v.Author, v.Height)
+	if v.Height < c.Height {
+		return nil
+	}
+	if flag, err := c.Aggreator.AddBlockVote(v); err != nil {
+		return err
+	} else if flag == BV_HIGH_FLAG {
+		logger.Debug.Printf("Enough VoteforBlock node %d height %d\n", c.Name, v.Height)
+		return c.PbBroadcastBlock(v.BlockHash)
+	} else {
+		return nil
+	}
+}
+
+/*********************************** Broadcast Block End***************************************/
+
+func (c *Core) TrytoStartMVBA() {
+
 }
 
 /*********************************** Protocol Start***************************************/

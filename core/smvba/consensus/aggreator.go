@@ -6,20 +6,22 @@ import (
 )
 
 type Aggreator struct {
-	committee        core.Committee
-	finishAggreator  map[int64]map[int64]*FinishAggreator
-	doneAggreator    map[int64]map[int64]*DoneAggreator
-	prevoteAggreator map[int64]map[int64]*PreVoteAggreator
-	finvoteAggreator map[int64]map[int64]*FinVoteAggreator
+	committee          core.Committee
+	finishAggreator    map[int64]map[int64]*FinishAggreator
+	doneAggreator      map[int64]map[int64]*DoneAggreator
+	prevoteAggreator   map[int64]map[int64]*PreVoteAggreator
+	finvoteAggreator   map[int64]map[int64]*FinVoteAggreator
+	blockvoteAggreator map[int64]*BlockVoteAggreator //map from height to BlockVoteAggreator
 }
 
 func NewAggreator(committee core.Committee) *Aggreator {
 	return &Aggreator{
-		committee:        committee,
-		finishAggreator:  make(map[int64]map[int64]*FinishAggreator),
-		doneAggreator:    make(map[int64]map[int64]*DoneAggreator),
-		prevoteAggreator: make(map[int64]map[int64]*PreVoteAggreator),
-		finvoteAggreator: make(map[int64]map[int64]*FinVoteAggreator),
+		committee:          committee,
+		finishAggreator:    make(map[int64]map[int64]*FinishAggreator),
+		doneAggreator:      make(map[int64]map[int64]*DoneAggreator),
+		prevoteAggreator:   make(map[int64]map[int64]*PreVoteAggreator),
+		finvoteAggreator:   make(map[int64]map[int64]*FinVoteAggreator),
+		blockvoteAggreator: make(map[int64]*BlockVoteAggreator),
 	}
 }
 
@@ -81,6 +83,15 @@ func (a *Aggreator) AddFinVote(vote *FinVote) (int8, error) {
 		items[vote.Round] = item
 		return item.Append(a.committee, vote)
 	}
+}
+
+func (a *Aggreator) AddBlockVote(vote *VoteforBlock) (int8, error) {
+	item, ok := a.blockvoteAggreator[vote.Height]
+	if !ok {
+		item = NewBlockVoteAggreator()
+		a.blockvoteAggreator[vote.Height] = item
+	}
+	return item.Append(a.committee, vote)
 }
 
 type FinishAggreator struct {
@@ -250,4 +261,34 @@ func (f *FinVoteAggreator) Append(committee core.Committee, vote *FinVote) (int8
 		return ACTION_YES, nil
 	}
 	return ACTION_NONE, nil
+}
+
+type BlockVoteAggreator struct {
+	Authors map[core.NodeID]struct{}
+}
+
+func NewBlockVoteAggreator() *BlockVoteAggreator {
+	return &BlockVoteAggreator{
+		Authors: make(map[core.NodeID]struct{}),
+	}
+}
+
+const (
+	BV_LOW_FLAG int8 = iota
+	BV_HIGH_FLAG
+	BV_NONE_FLAG
+)
+
+func (b *BlockVoteAggreator) Append(committee core.Committee, vote *VoteforBlock) (int8, error) {
+	if _, ok := b.Authors[vote.Author]; ok {
+		return 0, core.ErrOneMoreMessage(vote.MsgType(), vote.Height, 0, vote.Author)
+	}
+	b.Authors[vote.Author] = struct{}{}
+	if len(b.Authors) == committee.LowThreshold() {
+		return BV_LOW_FLAG, nil
+	}
+	if len(b.Authors) == committee.HightThreshold() {
+		return BV_HIGH_FLAG, nil
+	}
+	return BV_NONE_FLAG, nil
 }

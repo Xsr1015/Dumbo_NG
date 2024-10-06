@@ -27,14 +27,17 @@ type Validator interface {
 type Block struct {
 	Proposer core.NodeID
 	Batch    pool.Batch
-	Epoch    int64
+	//Epoch    int64
+	Height  int64
+	PreHash crypto.Digest
 }
 
-func NewBlock(proposer core.NodeID, Batch pool.Batch, Epoch int64) *Block {
+func NewBlock(proposer core.NodeID, Batch pool.Batch, Height int64, PreHash crypto.Digest) *Block {
 	return &Block{
 		Proposer: proposer,
 		Batch:    Batch,
-		Epoch:    Epoch,
+		Height:   Height,
+		PreHash:  PreHash,
 	}
 }
 
@@ -57,9 +60,88 @@ func (b *Block) Decode(data []byte) error {
 func (b *Block) Hash() crypto.Digest {
 	hasher := crypto.NewHasher()
 	hasher.Add(strconv.AppendInt(nil, int64(b.Proposer), 2))
-	hasher.Add(strconv.AppendInt(nil, b.Epoch, 2))
+	hasher.Add(strconv.AppendInt(nil, b.Height, 2))
 	hasher.Add(strconv.AppendInt(nil, int64(b.Batch.ID), 2))
 	return hasher.Sum256(nil)
+}
+
+type BlockMessage struct {
+	Author    core.NodeID
+	B         *Block
+	Height    int64
+	Signature crypto.Signature
+}
+
+func NewBlockMessage(Author core.NodeID, B *Block, Height int64, sigService *crypto.SigService) (*BlockMessage, error) {
+	blockMessage := &BlockMessage{
+		Author: Author,
+		B:      B,
+		Height: Height,
+	}
+	sig, err := sigService.RequestSignature(blockMessage.Hash())
+	if err != nil {
+		return nil, err
+	}
+	blockMessage.Signature = sig
+	return blockMessage, nil
+}
+
+func (bm *BlockMessage) Verify(committee core.Committee) bool {
+	pub := committee.Name(bm.Author)
+	return bm.Signature.Verify(pub, bm.Hash())
+}
+
+func (bm *BlockMessage) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(bm.Author), 2))
+	hasher.Add(strconv.AppendInt(nil, bm.Height, 2))
+	if bm.B != nil {
+		d := bm.B.Hash()
+		hasher.Add(d[:])
+	}
+	return hasher.Sum256(nil)
+}
+
+func (*BlockMessage) MsgType() int {
+	return BlockMessageType
+}
+
+type VoteforBlock struct {
+	Author    core.NodeID
+	BlockHash crypto.Digest
+	Height    int64
+	Signature crypto.Signature
+}
+
+func NewVoteforBlock(Author core.NodeID, BlockHash crypto.Digest, Height int64, sigService *crypto.SigService) (*VoteforBlock, error) {
+	vote := &VoteforBlock{
+		Author:    Author,
+		BlockHash: BlockHash,
+		Height:    Height,
+	}
+	sig, err := sigService.RequestSignature(vote.Hash())
+	if err != nil {
+		return nil, err
+	}
+	vote.Signature = sig
+	return vote, nil
+}
+
+func (v *VoteforBlock) Verify(committee core.Committee) bool {
+	pub := committee.Name(v.Author)
+	return v.Signature.Verify(pub, v.Hash())
+}
+
+func (v *VoteforBlock) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(v.Author), 2))
+	hasher.Add(strconv.AppendInt(nil, v.Height, 2))
+	hasher.Add(v.BlockHash[:])
+	return hasher.Sum256(nil)
+}
+
+func (*VoteforBlock) MsgType() int {
+	return VoteforBlockType
 }
 
 type SPBProposal struct {
@@ -416,15 +498,19 @@ const (
 	PrevoteType
 	FinVoteType
 	HaltType
+	BlockMessageType
+	VoteforBlockType
 )
 
 var DefaultMessageTypeMap = map[int]reflect.Type{
-	SPBProposalType: reflect.TypeOf(SPBProposal{}),
-	SPBVoteType:     reflect.TypeOf(SPBVote{}),
-	FinishType:      reflect.TypeOf(Finish{}),
-	DoneType:        reflect.TypeOf(Done{}),
-	ElectShareType:  reflect.TypeOf(ElectShare{}),
-	PrevoteType:     reflect.TypeOf(Prevote{}),
-	FinVoteType:     reflect.TypeOf(FinVote{}),
-	HaltType:        reflect.TypeOf(Halt{}),
+	SPBProposalType:  reflect.TypeOf(SPBProposal{}),
+	SPBVoteType:      reflect.TypeOf(SPBVote{}),
+	FinishType:       reflect.TypeOf(Finish{}),
+	DoneType:         reflect.TypeOf(Done{}),
+	ElectShareType:   reflect.TypeOf(ElectShare{}),
+	PrevoteType:      reflect.TypeOf(Prevote{}),
+	FinVoteType:      reflect.TypeOf(FinVote{}),
+	HaltType:         reflect.TypeOf(Halt{}),
+	BlockMessageType: reflect.TypeOf(BlockMessage{}),
+	VoteforBlockType: reflect.TypeOf(VoteforBlock{}),
 }
