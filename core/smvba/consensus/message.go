@@ -144,16 +144,60 @@ func (*VoteforBlock) MsgType() int {
 	return VoteforBlockType
 }
 
+type CertForBlockData struct {
+	Height int64
+	Hash   crypto.Digest
+}
+
+type SMVBABlock struct {
+	Proposer      core.NodeID
+	SMVBAProposal map[core.NodeID]*CertForBlockData
+	Epoch         int64
+}
+
+func NewSMVBABlock(proposer core.NodeID, SMVBAProposal map[core.NodeID]*CertForBlockData, Epoch int64) *SMVBABlock {
+	return &SMVBABlock{
+		Proposer:      proposer,
+		SMVBAProposal: SMVBAProposal,
+		Epoch:         Epoch,
+	}
+}
+
+func (b *SMVBABlock) Encode() ([]byte, error) {
+	buf := bytes.NewBuffer(nil)
+	if err := gob.NewEncoder(buf).Encode(b); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (b *SMVBABlock) Decode(data []byte) error {
+	buf := bytes.NewBuffer(data)
+	if err := gob.NewDecoder(buf).Decode(b); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *SMVBABlock) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(b.Proposer), 2))
+	hasher.Add(strconv.AppendInt(nil, b.Epoch, 2))
+	hasher.Add(strconv.AppendInt(nil, int64(b.SMVBAProposal[1].Height), 2))
+	hasher.Add(b.SMVBAProposal[1].Hash[:])
+	return hasher.Sum256(nil)
+}
+
 type SPBProposal struct {
 	Author    core.NodeID
-	B         *Block
+	B         *SMVBABlock
 	Epoch     int64
 	Round     int64
 	Phase     int8
 	Signature crypto.Signature
 }
 
-func NewSPBProposal(Author core.NodeID, B *Block, Epoch, Round int64, Phase int8, sigService *crypto.SigService) (*SPBProposal, error) {
+func NewSPBProposal(Author core.NodeID, B *SMVBABlock, Epoch, Round int64, Phase int8, sigService *crypto.SigService) (*SPBProposal, error) {
 	proposal := &SPBProposal{
 		Author: Author,
 		B:      B,

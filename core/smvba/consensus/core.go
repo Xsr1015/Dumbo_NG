@@ -6,6 +6,7 @@ import (
 	"bft/mvba/logger"
 	"bft/mvba/pool"
 	"bft/mvba/store"
+	"sync"
 )
 
 type Core struct {
@@ -31,6 +32,9 @@ type Core struct {
 	ReadyFlags   map[int64]map[int64]struct{}
 	HaltFlags    map[int64]struct{}
 	Epoch        int64
+
+	blocklock sync.Mutex
+	smvbaflag bool
 }
 
 func NewCore(
@@ -63,6 +67,7 @@ func NewCore(
 		DoneFlags:    make(map[int64]map[int64]struct{}),
 		ReadyFlags:   make(map[int64]map[int64]struct{}),
 		HaltFlags:    make(map[int64]struct{}),
+		smvbaflag:    false, //true: running; false: finished
 	}
 	c.initCert()
 
@@ -72,7 +77,7 @@ func NewCore(
 func (c *Core) initCert() {
 	c.OrderedCert = make(map[core.NodeID]int64) //map from sender to height
 	c.CurrentCert = make(map[core.NodeID]int64) //map from sender to height
-	for id, _ := range c.Committee.Authorities {
+	for id := range c.Committee.Authorities {
 		c.CurrentCert[id] = 0
 		c.OrderedCert[id] = 0
 	}
@@ -103,6 +108,33 @@ func (c *Core) getBlock(digest crypto.Digest) (*Block, error) {
 	}
 
 	b := &Block{}
+	if err := b.Decode(value); err != nil {
+		return nil, err
+	}
+	return b, err
+}
+
+func (c *Core) storeSMVBABlock(block *SMVBABlock) error {
+	key := block.Hash()
+	value, err := block.Encode()
+	if err != nil {
+		return err
+	}
+	return c.Store.Write(key[:], value)
+}
+
+func (c *Core) getSMVBABlock(digest crypto.Digest) (*SMVBABlock, error) {
+	value, err := c.Store.Read(digest[:])
+
+	if err == store.ErrNotFoundKey {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	b := &SMVBABlock{}
 	if err := b.Decode(value); err != nil {
 		return nil, err
 	}
@@ -182,6 +214,8 @@ func (c *Core) PbBroadcastBlock(preHash crypto.Digest) error {
 }
 
 func (c *Core) handleBlockMessage(bm *BlockMessage) error {
+	c.blocklock.Lock()
+	defer c.blocklock.Unlock()
 	logger.Debug.Printf("Processing BlockMessage proposer %d height %d\n", bm.Author, bm.Height)
 
 	c.CurrentCert[bm.Author] = bm.Height - 1
@@ -194,6 +228,7 @@ func (c *Core) handleBlockMessage(bm *BlockMessage) error {
 		return err
 	}
 	go c.PbSendVote(bm.Author, bm.Height, bm.B.Hash())
+	go c.TrytoStartMVBA()
 	return nil
 }
 
@@ -204,15 +239,19 @@ func (c *Core) PbSendVote(to core.NodeID, height int64, blockHash crypto.Digest)
 }
 
 func (c *Core) handleVoteForBlock(v *VoteforBlock) error {
+	c.blocklock.Lock()
+	defer c.blocklock.Unlock()
 	logger.Debug.Printf("Processing VoteforBlock proposer %d height %d\n", v.Author, v.Height)
 	if v.Height < c.Height {
 		return nil
 	}
 	if flag, err := c.Aggreator.AddBlockVote(v); err != nil {
+		logger.Warn.Println(err)
 		return err
 	} else if flag == BV_HIGH_FLAG {
 		logger.Debug.Printf("Enough VoteforBlock node %d height %d\n", c.Name, v.Height)
-		return c.PbBroadcastBlock(v.BlockHash)
+		go c.PbBroadcastBlock(v.BlockHash)
+		return nil
 	} else {
 		return nil
 	}
@@ -221,7 +260,63 @@ func (c *Core) handleVoteForBlock(v *VoteforBlock) error {
 /*********************************** Broadcast Block End***************************************/
 
 func (c *Core) TrytoStartMVBA() {
+	c.blocklock.Lock()
+	defer c.blocklock.Unlock()
+	if c.smvbaflag {
+		return
+	}
+	smvbaproposal, newCount := c.generatesmvbaproposal()
+	if newCount >= c.Committee.HightThreshold() {
+		c.smvbaflag = true
+		smvbablock := NewSMVBABlock(c.Name, smvbaproposal, c.Epoch)
+		spbproposal, _ := NewSPBProposal(c.Name, smvbablock, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
+		if err := c.Transimtor.Send(c.Name, core.NONE, spbproposal); err != nil {
+			panic(err)
+		}
+		c.Transimtor.RecvChannel() <- spbproposal
+	}
+}
 
+func (c *Core) generatesmvbaproposal() (map[core.NodeID]*CertForBlockData, int) {
+	var newCount = 0
+	proposal := make(map[core.NodeID]*CertForBlockData)
+	for id, height := range c.CurrentCert {
+		if c.CurrentCert[id] > c.OrderedCert[id] {
+			newCount++
+		}
+		var certforblock CertForBlockData
+		if height == 0 {
+			certforblock = CertForBlockData{0, crypto.Digest{}}
+		} else {
+			certforblock = CertForBlockData{height, c.BlockHashMap[id][height]}
+		}
+		proposal[id] = &certforblock
+	}
+	return proposal, newCount
+}
+
+func (c *Core) commitSMVBABlock(block *SMVBABlock) error {
+	proposal := block.SMVBAProposal
+	for id, cert := range proposal {
+		if cert.Height > c.OrderedCert[id] {
+			for i := c.OrderedCert[id] + 1; i <= cert.Height; i++ {
+				c.blocklock.Lock()
+				blockhash, ok := c.BlockHashMap[id][i]
+				c.blocklock.Unlock()
+				if !ok {
+					logger.Info.Printf("No block when commit height %d author %d\n", i, id)
+					continue
+				}
+				if block, err := c.getBlock(blockhash); err != nil {
+					return err
+				} else {
+					c.Commitor.commitCh <- block
+				}
+			}
+			c.OrderedCert[id] = cert.Height
+		}
+	}
+	return nil
 }
 
 /*********************************** Protocol Start***************************************/
@@ -232,7 +327,8 @@ func (c *Core) handleSpbProposal(p *SPBProposal) error {
 	if p.Phase == SPB_ONE_PHASE {
 		if _, ok := c.HaltFlags[p.Epoch]; ok {
 			if leader := c.Elector.Leader(p.Epoch, p.Round); leader == p.Author {
-				c.Commitor.Commit(p.B)
+				//c.Commitor.Commit(p.B)
+				c.commitSMVBABlock(p.B)
 			}
 		}
 	}
@@ -244,7 +340,7 @@ func (c *Core) handleSpbProposal(p *SPBProposal) error {
 
 	//Store Block at first time
 	if p.Phase == SPB_ONE_PHASE {
-		if err := c.storeBlock(p.B); err != nil {
+		if err := c.storeSMVBABlock(p.B); err != nil {
 			logger.Error.Printf("Store Block error: %v\n", err)
 			return err
 		}
@@ -456,12 +552,16 @@ func (c *Core) advanceNextRound(epoch, round int64, flag int8, blockHash crypto.
 	}
 
 	var proposal *SPBProposal
-	if block, err := c.getBlock(blockHash); err != nil {
+	if block, err := c.getSMVBABlock(blockHash); err != nil {
 		return err
 	} else if block != nil {
 		proposal, _ = NewSPBProposal(c.Name, block, epoch, round+1, SPB_ONE_PHASE, c.SigService)
 	} else {
-		proposal, _ = NewSPBProposal(c.Name, c.generatorBlock(epoch), epoch, round+1, SPB_ONE_PHASE, c.SigService)
+		c.blocklock.Lock()
+		smvbapropasal, _ := c.generatesmvbaproposal()
+		c.blocklock.Unlock()
+		smvbablock := NewSMVBABlock(c.Name, smvbapropasal, epoch)
+		proposal, _ = NewSPBProposal(c.Name, smvbablock, epoch, round+1, SPB_ONE_PHASE, c.SigService)
 	}
 	c.Transimtor.Send(c.Name, core.NONE, proposal)
 	c.Transimtor.RecvChannel() <- proposal
@@ -493,10 +593,11 @@ func (c *Core) handleHalt(h *Halt) error {
 
 func (c *Core) handleOutput(epoch int64, blockHash crypto.Digest) error {
 	logger.Debug.Printf("Processing Ouput epoch %d \n", epoch)
-	if b, err := c.getBlock(blockHash); err != nil {
+	if b, err := c.getSMVBABlock(blockHash); err != nil {
 		return err
 	} else if b != nil {
-		c.Commitor.Commit(b)
+		//c.Commitor.Commit(b)
+		c.commitSMVBABlock(b)
 		// if b.Proposer != c.Name {
 		// 	temp := c.getSpbInstance(epoch, 0, c.Name).GetBlockHash()
 		// 	if temp != nil {
@@ -514,6 +615,8 @@ func (c *Core) handleOutput(epoch int64, blockHash crypto.Digest) error {
 
 /*********************************** Protocol End***************************************/
 func (c *Core) advanceNextEpoch(epoch int64) {
+	c.blocklock.Lock()
+	defer c.blocklock.Unlock()
 	if epoch <= c.Epoch {
 		return
 	}
@@ -521,21 +624,24 @@ func (c *Core) advanceNextEpoch(epoch int64) {
 	//Clear Something
 
 	c.Epoch = epoch
-	block := c.generatorBlock(epoch)
-	proposal, _ := NewSPBProposal(c.Name, block, epoch, 0, SPB_ONE_PHASE, c.SigService)
-	c.Transimtor.Send(c.Name, core.NONE, proposal)
-	c.Transimtor.RecvChannel() <- proposal
+	c.smvbaflag = false
+	// block := c.generatorBlock(epoch)
+	// proposal, _ := NewSPBProposal(c.Name, block, epoch, 0, SPB_ONE_PHASE, c.SigService)
+	// c.Transimtor.Send(c.Name, core.NONE, proposal)
+	// c.Transimtor.RecvChannel() <- proposal
+	go c.TrytoStartMVBA()
 }
 
 func (c *Core) Run() {
 
 	//first proposal
-	block := c.generatorBlock(c.Epoch)
-	proposal, _ := NewSPBProposal(c.Name, block, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
-	if err := c.Transimtor.Send(c.Name, core.NONE, proposal); err != nil {
-		panic(err)
-	}
-	c.Transimtor.RecvChannel() <- proposal
+	// block := c.generatorBlock(c.Epoch)
+	// proposal, _ := NewSPBProposal(c.Name, block, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
+	// if err := c.Transimtor.Send(c.Name, core.NONE, proposal); err != nil {
+	// 	panic(err)
+	// }
+	// c.Transimtor.RecvChannel() <- proposal
+	go c.PbBroadcastBlock(crypto.Digest{})
 
 	recvChannal := c.Transimtor.RecvChannel()
 	for {
@@ -568,6 +674,10 @@ func (c *Core) Run() {
 					err = c.handleFinvote(msg.(*FinVote))
 				case HaltType:
 					err = c.handleHalt(msg.(*Halt))
+				case BlockMessageType:
+					go c.handleBlockMessage(msg.(*BlockMessage))
+				case VoteforBlockType:
+					go c.handleVoteForBlock(msg.(*VoteforBlock))
 
 				}
 			}

@@ -50,11 +50,11 @@ class LogParser:
         tmp = findall(r'\[INFO] (.*) pool.* Received Batch (\d+)', log)
         batchs = { id:self._to_posix(t) for t,id in tmp}
         
-        tmp = findall(r'\[INFO] (.*) core.* create Block epoch \d+ node \d+ batch_id (\d+)', log)
+        tmp = findall(r'\[INFO] (.*) core.* create Block height \d+ node \d+ batch_id (\d+)', log)
         tmp = { (id,self._to_posix(t)) for t,id in tmp }
         proposals = self._merge_results([tmp])
 
-        tmp = findall(r'\[INFO] (.*) commitor.* commit Block epoch \d+ node \d+ batch_id (\d+)', log)
+        tmp = findall(r'\[INFO] (.*) commitor.* commit Block height \d+ node \d+ batch_id (\d+)', log)
         tmp = [(id, self._to_posix(t)) for t, id in tmp]
         commits = self._merge_results([tmp])
 

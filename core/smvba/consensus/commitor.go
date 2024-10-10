@@ -20,26 +20,26 @@ func NewCommittor(callBack chan<- struct{}) *Committor {
 	return c
 }
 
-func (c *Committor) Commit(block *Block) {
-	if block.Epoch < c.Index {
-		return
-	}
-	c.Blocks[block.Epoch] = block
-	for {
-		if b, ok := c.Blocks[c.Index]; ok {
-			c.commitCh <- b
-			delete(c.Blocks, c.Index)
-			c.Index++
-		} else {
-			break
-		}
-	}
-}
+// func (c *Committor) Commit(block *Block) {
+// 	if block.Epoch < c.Index {
+// 		return
+// 	}
+// 	c.Blocks[block.Epoch] = block
+// 	for {
+// 		if b, ok := c.Blocks[c.Index]; ok {
+// 			c.commitCh <- b
+// 			delete(c.Blocks, c.Index)
+// 			c.Index++
+// 		} else {
+// 			break
+// 		}
+// 	}
+// }
 
 func (c *Committor) run() {
 	for block := range c.commitCh {
 		if block.Batch.ID != -1 {
-			logger.Info.Printf("commit Block epoch %d node %d batch_id %d \n", block.Epoch, block.Proposer, block.Batch.ID)
+			logger.Info.Printf("commit Block height %d node %d batch_id %d \n", block.Height, block.Proposer, block.Batch.ID)
 		}
 		c.callBack <- struct{}{}
 	}
