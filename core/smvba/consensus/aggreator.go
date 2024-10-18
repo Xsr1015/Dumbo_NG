@@ -6,22 +6,26 @@ import (
 )
 
 type Aggreator struct {
-	committee          core.Committee
-	finishAggreator    map[int64]map[int64]*FinishAggreator
-	doneAggreator      map[int64]map[int64]*DoneAggreator
-	prevoteAggreator   map[int64]map[int64]*PreVoteAggreator
-	finvoteAggreator   map[int64]map[int64]*FinVoteAggreator
-	blockvoteAggreator map[int64]*BlockVoteAggreator //map from height to BlockVoteAggreator
+	committee           core.Committee
+	finishAggreator     map[int64]map[int64]*FinishAggreator
+	doneAggreator       map[int64]map[int64]*DoneAggreator
+	prevoteAggreator    map[int64]map[int64]*PreVoteAggreator
+	finvoteAggreator    map[int64]map[int64]*FinVoteAggreator
+	blockvoteAggreator  map[int64]*BlockVoteAggreator //map from height to BlockVoteAggreator
+	fastshareAggreator  map[int64]*FastShareAggreator //map from epoch to FastShareAggreator
+	fastcommitAggreator map[int64]*FastCommitAggreator
 }
 
 func NewAggreator(committee core.Committee) *Aggreator {
 	return &Aggreator{
-		committee:          committee,
-		finishAggreator:    make(map[int64]map[int64]*FinishAggreator),
-		doneAggreator:      make(map[int64]map[int64]*DoneAggreator),
-		prevoteAggreator:   make(map[int64]map[int64]*PreVoteAggreator),
-		finvoteAggreator:   make(map[int64]map[int64]*FinVoteAggreator),
-		blockvoteAggreator: make(map[int64]*BlockVoteAggreator),
+		committee:           committee,
+		finishAggreator:     make(map[int64]map[int64]*FinishAggreator),
+		doneAggreator:       make(map[int64]map[int64]*DoneAggreator),
+		prevoteAggreator:    make(map[int64]map[int64]*PreVoteAggreator),
+		finvoteAggreator:    make(map[int64]map[int64]*FinVoteAggreator),
+		blockvoteAggreator:  make(map[int64]*BlockVoteAggreator),
+		fastshareAggreator:  make(map[int64]*FastShareAggreator),
+		fastcommitAggreator: make(map[int64]*FastCommitAggreator),
 	}
 }
 
@@ -35,7 +39,7 @@ func (a *Aggreator) AddFinishVote(finish *Finish) (bool, error) {
 		return item.Append(a.committee, finish)
 	} else {
 		item = NewFinishAggreator()
-		items[finish.Round] = NewFinishAggreator()
+		items[finish.Round] = item
 		return item.Append(a.committee, finish)
 	}
 }
@@ -92,6 +96,24 @@ func (a *Aggreator) AddBlockVote(vote *VoteforBlock) (int8, error) {
 		a.blockvoteAggreator[vote.Height] = item
 	}
 	return item.Append(a.committee, vote)
+}
+
+func (a *Aggreator) AddFastShare(share *FastShare) (bool, error) {
+	item, ok := a.fastshareAggreator[share.Epoch]
+	if !ok {
+		item = NewFastShareAggreator()
+		a.fastshareAggreator[share.Epoch] = item
+	}
+	return item.Append(a.committee, share)
+}
+
+func (a *Aggreator) AddFastCommit(commit *FastCommit) (bool, error) {
+	item, ok := a.fastcommitAggreator[commit.Epoch]
+	if !ok {
+		item = NewFastCommitAggreator()
+		a.fastcommitAggreator[commit.Epoch] = item
+	}
+	return item.Append(a.committee, commit)
 }
 
 type FinishAggreator struct {
@@ -291,4 +313,46 @@ func (b *BlockVoteAggreator) Append(committee core.Committee, vote *VoteforBlock
 		return BV_HIGH_FLAG, nil
 	}
 	return BV_NONE_FLAG, nil
+}
+
+type FastShareAggreator struct {
+	Authors map[core.NodeID]struct{}
+}
+
+func NewFastShareAggreator() *FastShareAggreator {
+	return &FastShareAggreator{
+		Authors: make(map[core.NodeID]struct{}),
+	}
+}
+
+func (f *FastShareAggreator) Append(committee core.Committee, share *FastShare) (bool, error) {
+	if _, ok := f.Authors[share.Author]; ok {
+		return false, core.ErrOneMoreMessage(share.MsgType(), share.Epoch, 0, share.Author)
+	}
+	f.Authors[share.Author] = struct{}{}
+	if len(f.Authors) == committee.HightThreshold() {
+		return true, nil
+	}
+	return false, nil
+}
+
+type FastCommitAggreator struct {
+	Authors map[core.NodeID]struct{}
+}
+
+func NewFastCommitAggreator() *FastCommitAggreator {
+	return &FastCommitAggreator{
+		Authors: make(map[core.NodeID]struct{}),
+	}
+}
+
+func (f *FastCommitAggreator) Append(committee core.Committee, commit *FastCommit) (bool, error) {
+	if _, ok := f.Authors[commit.Author]; ok {
+		return false, core.ErrOneMoreMessage(commit.MsgType(), commit.Epoch, 0, commit.Author)
+	}
+	f.Authors[commit.Author] = struct{}{}
+	if len(f.Authors) == committee.HightThreshold() {
+		return true, nil
+	}
+	return false, nil
 }

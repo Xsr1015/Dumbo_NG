@@ -188,6 +188,170 @@ func (b *SMVBABlock) Hash() crypto.Digest {
 	return hasher.Sum256(nil)
 }
 
+type FastProposal struct {
+	Author    core.NodeID
+	B         *SMVBABlock
+	Epoch     int64
+	Signature crypto.Signature
+}
+
+func NewFastProposal(Author core.NodeID, B *SMVBABlock, Epoch int64, sigService *crypto.SigService) (*FastProposal, error) {
+	proposal := &FastProposal{
+		Author: Author,
+		B:      B,
+		Epoch:  Epoch,
+	}
+	sig, err := sigService.RequestSignature(proposal.Hash())
+	if err != nil {
+		return nil, err
+	}
+	proposal.Signature = sig
+	return proposal, nil
+}
+
+func (p *FastProposal) Verify(committee core.Committee) bool {
+	pub := committee.Name(p.Author)
+	return p.Signature.Verify(pub, p.Hash())
+}
+
+func (p *FastProposal) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(p.Author), 2))
+	hasher.Add(strconv.AppendInt(nil, p.Epoch, 2))
+	if p.B != nil {
+		d := p.B.Hash()
+		hasher.Add(d[:])
+	}
+	return hasher.Sum256(nil)
+}
+
+func (*FastProposal) MsgType() int {
+	return FastProposalType
+}
+
+type FastShare struct {
+	Author    core.NodeID
+	B         *SMVBABlock
+	Epoch     int64
+	Signature crypto.Signature
+}
+
+func NewFastShare(Author core.NodeID, B *SMVBABlock, Epoch int64, sigService *crypto.SigService) (*FastShare, error) {
+	share := &FastShare{
+		Author: Author,
+		B:      B,
+		Epoch:  Epoch,
+	}
+	sig, err := sigService.RequestSignature(share.Hash())
+	if err != nil {
+		return nil, err
+	}
+	share.Signature = sig
+	return share, nil
+}
+
+func (s *FastShare) Verify(committee core.Committee) bool {
+	pub := committee.Name(s.Author)
+	return s.Signature.Verify(pub, s.Hash())
+}
+
+func (s *FastShare) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(s.Author), 2))
+	hasher.Add(strconv.AppendInt(nil, s.Epoch, 2))
+	if s.B != nil {
+		d := s.B.Hash()
+		hasher.Add(d[:])
+	}
+	return hasher.Sum256(nil)
+}
+
+func (*FastShare) MsgType() int {
+	return FastShareType
+}
+
+type FastCommit struct {
+	Author    core.NodeID
+	B         *SMVBABlock
+	Epoch     int64
+	Signature crypto.Signature
+}
+
+func NewFastCommit(Author core.NodeID, B *SMVBABlock, Epoch int64, sigService *crypto.SigService) (*FastCommit, error) {
+	commit := &FastCommit{
+		Author: Author,
+		B:      B,
+		Epoch:  Epoch,
+	}
+	sig, err := sigService.RequestSignature(commit.Hash())
+	if err != nil {
+		return nil, err
+	}
+	commit.Signature = sig
+	return commit, nil
+}
+
+func (c *FastCommit) Verify(committee core.Committee) bool {
+	pub := committee.Name(c.Author)
+	return c.Signature.Verify(pub, c.Hash())
+}
+
+func (c *FastCommit) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(c.Author), 2))
+	hasher.Add(strconv.AppendInt(nil, c.Epoch, 2))
+	if c.B != nil {
+		d := c.B.Hash()
+		hasher.Add(d[:])
+	}
+	return hasher.Sum256(nil)
+}
+
+func (*FastCommit) MsgType() int {
+	return FastCommitType
+}
+
+type FastHalt struct {
+	Author    core.NodeID
+	B         *SMVBABlock
+	Epoch     int64
+	Signature crypto.Signature
+}
+
+func NewFastHalt(Author core.NodeID, B *SMVBABlock, Epoch int64, sigService *crypto.SigService) (*FastHalt, error) {
+	halt := &FastHalt{
+		Author: Author,
+		B:      B,
+		Epoch:  Epoch,
+	}
+	sig, err := sigService.RequestSignature(halt.Hash())
+	if err != nil {
+		return nil, err
+	}
+	halt.Signature = sig
+	return halt, nil
+}
+
+func (h *FastHalt) Verify(committee core.Committee) bool {
+	pub := committee.Name(h.Author)
+	return h.Signature.Verify(pub, h.Hash())
+}
+
+func (h *FastHalt) Hash() crypto.Digest {
+	hasher := crypto.NewHasher()
+	hasher.Add(strconv.AppendInt(nil, int64(h.Author), 2))
+	hasher.Add(strconv.AppendInt(nil, h.Epoch, 2))
+	if h.B != nil {
+		d := h.B.Hash()
+		hasher.Add(d[:])
+	}
+	return hasher.Sum256(nil)
+}
+
+func (*FastHalt) MsgType() int {
+	return FastHaltType
+}
+
 type SPBProposal struct {
 	Author    core.NodeID
 	B         *SMVBABlock
@@ -544,6 +708,10 @@ const (
 	HaltType
 	BlockMessageType
 	VoteforBlockType
+	FastProposalType
+	FastShareType
+	FastCommitType
+	FastHaltType
 )
 
 var DefaultMessageTypeMap = map[int]reflect.Type{
@@ -557,4 +725,8 @@ var DefaultMessageTypeMap = map[int]reflect.Type{
 	HaltType:         reflect.TypeOf(Halt{}),
 	BlockMessageType: reflect.TypeOf(BlockMessage{}),
 	VoteforBlockType: reflect.TypeOf(VoteforBlock{}),
+	FastProposalType: reflect.TypeOf(FastProposal{}),
+	FastShareType:    reflect.TypeOf(FastShare{}),
+	FastCommitType:   reflect.TypeOf(FastCommit{}),
+	FastHaltType:     reflect.TypeOf(FastHalt{}),
 }

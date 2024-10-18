@@ -7,6 +7,7 @@ import (
 	"bft/mvba/pool"
 	"bft/mvba/store"
 	"sync"
+	"time"
 )
 
 type Core struct {
@@ -31,10 +32,13 @@ type Core struct {
 	DoneFlags    map[int64]map[int64]struct{}
 	ReadyFlags   map[int64]map[int64]struct{}
 	HaltFlags    map[int64]struct{}
+	TimeFlags    map[int64]struct{}
 	Epoch        int64
 
-	blocklock sync.Mutex
-	smvbaflag bool
+	blocklock    sync.Mutex
+	fastpathlock sync.Mutex
+	smvbaflag    bool
+	lockdata     map[int64]*SMVBABlock
 }
 
 func NewCore(
@@ -67,7 +71,9 @@ func NewCore(
 		DoneFlags:    make(map[int64]map[int64]struct{}),
 		ReadyFlags:   make(map[int64]map[int64]struct{}),
 		HaltFlags:    make(map[int64]struct{}),
+		TimeFlags:    make(map[int64]struct{}),
 		smvbaflag:    false, //true: running; false: finished
+		lockdata:     make(map[int64]*SMVBABlock),
 	}
 	c.initCert()
 
@@ -268,12 +274,16 @@ func (c *Core) TrytoStartMVBA() {
 	smvbaproposal, newCount := c.generatesmvbaproposal()
 	if newCount >= c.Committee.HightThreshold() {
 		c.smvbaflag = true
-		smvbablock := NewSMVBABlock(c.Name, smvbaproposal, c.Epoch)
-		spbproposal, _ := NewSPBProposal(c.Name, smvbablock, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
-		if err := c.Transimtor.Send(c.Name, core.NONE, spbproposal); err != nil {
-			panic(err)
+		//spbproposal, _ := NewSPBProposal(c.Name, smvbablock, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
+		if c.Epoch%int64(c.Committee.Size()) == int64(c.Name) { //whether is leader
+			smvbablock := NewSMVBABlock(c.Name, smvbaproposal, c.Epoch)
+			fastproposal, _ := NewFastProposal(c.Name, smvbablock, c.Epoch, c.SigService)
+			if err := c.Transimtor.Send(c.Name, core.NONE, fastproposal); err != nil {
+				panic(err)
+			}
+			c.Transimtor.RecvChannel() <- fastproposal
 		}
-		c.Transimtor.RecvChannel() <- spbproposal
+		go c.fastpathTimer(c.Epoch)
 	}
 }
 
@@ -318,6 +328,111 @@ func (c *Core) commitSMVBABlock(block *SMVBABlock) error {
 	}
 	return nil
 }
+
+/*********************************** Fastpath Start***************************************/
+func (c *Core) fastpathTimer(epoch int64) {
+	logger.Debug.Printf("Timer start epoch %d\n", c.Epoch)
+	time.Sleep(2 * time.Second)
+	c.fastpathlock.Lock()
+	defer c.fastpathlock.Unlock()
+	c.TimeFlags[epoch] = struct{}{}
+	if _, ok := c.HaltFlags[epoch]; !ok {
+		logger.Debug.Printf("Fastpath Timeout epoch %d\n", epoch)
+		var data *SMVBABlock
+		if c.lockdata[epoch] != nil {
+			data = c.lockdata[epoch]
+		} else {
+			c.blocklock.Lock()
+			smvbapropasal, _ := c.generatesmvbaproposal()
+			c.blocklock.Unlock()
+			data = NewSMVBABlock(c.Name, smvbapropasal, epoch)
+		}
+		proposal, _ := NewSPBProposal(c.Name, data, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
+		c.Transimtor.Send(c.Name, core.NONE, proposal)
+		c.Transimtor.RecvChannel() <- proposal
+	}
+}
+
+func (c *Core) handleFastProposal(p *FastProposal) error {
+	logger.Debug.Printf("Processing FastProposal proposer %d epoch %d\n", p.Author, p.Epoch)
+	if c.messgaeFilter(p.Epoch) {
+		return nil
+	}
+	c.fastpathlock.Lock()
+	defer c.fastpathlock.Unlock()
+	if _, ok := c.TimeFlags[p.Epoch]; ok {
+		return nil
+	}
+	c.storeSMVBABlock(p.B)
+	fastshare, _ := NewFastShare(c.Name, p.B, p.Epoch, c.SigService)
+	logger.Debug.Printf("Send FastShare epoch %d\n", p.Epoch)
+	c.Transimtor.Send(c.Name, core.NONE, fastshare)
+	c.Transimtor.RecvChannel() <- fastshare
+	return nil
+}
+
+func (c *Core) handleFastShare(s *FastShare) error {
+	logger.Debug.Printf("Processing FastShare proposer %d epoch %d\n", s.Author, s.Epoch)
+	if c.messgaeFilter(s.Epoch) {
+		return nil
+	}
+	c.fastpathlock.Lock()
+	defer c.fastpathlock.Unlock()
+	if _, ok := c.TimeFlags[s.Epoch]; ok {
+		logger.Debug.Printf("FastShare time out epoch %d\n", s.Epoch)
+		return nil
+	}
+	if flag, err := c.Aggreator.AddFastShare(s); err != nil {
+		return err
+	} else if flag {
+		c.lockdata[s.Epoch] = s.B
+		fastcommit, _ := NewFastCommit(c.Name, s.B, s.Epoch, c.SigService)
+		if err := c.Transimtor.Send(c.Name, core.NONE, fastcommit); err != nil {
+			panic(err)
+		}
+		c.Transimtor.RecvChannel() <- fastcommit
+		return nil
+	} else {
+		return nil
+	}
+}
+
+func (c *Core) handleFastCommit(f *FastCommit) error {
+	logger.Debug.Printf("Processing FastCommit proposer %d epoch %d\n", f.Author, f.Epoch)
+	if c.messgaeFilter(f.Epoch) {
+		return nil
+	}
+	c.fastpathlock.Lock()
+	defer c.fastpathlock.Unlock()
+	if _, ok := c.TimeFlags[f.Epoch]; ok {
+		return nil
+	}
+	if flag, err := c.Aggreator.AddFastCommit(f); err != nil {
+		return err
+	} else if flag {
+		fasthalt, _ := NewFastHalt(c.Name, f.B, f.Epoch, c.SigService)
+		c.Transimtor.Send(c.Name, core.NONE, fasthalt)
+		c.Transimtor.RecvChannel() <- fasthalt
+	}
+	return nil
+}
+
+func (c *Core) handleFastHalt(h *FastHalt) error {
+	logger.Debug.Printf("Processing FastHalt proposer %d epoch %d\n", h.Author, h.Epoch)
+	if c.messgaeFilter(h.Epoch) {
+		return nil
+	}
+	if _, ok := c.HaltFlags[h.Epoch]; !ok {
+		c.fastpathlock.Lock()
+		c.HaltFlags[h.Epoch] = struct{}{}
+		c.fastpathlock.Unlock()
+		c.commitSMVBABlock(h.B)
+		c.advanceNextEpoch(h.Epoch + 1)
+	}
+	return nil
+}
+
+/*********************************** Fastpath End***************************************/
 
 /*********************************** Protocol Start***************************************/
 func (c *Core) handleSpbProposal(p *SPBProposal) error {
@@ -371,6 +486,7 @@ func (c *Core) handleFinish(f *Finish) error {
 
 	//discard message
 	if c.messgaeFilter(f.Epoch) {
+		logger.Debug.Printf("Discard Finish epoch %d round %d\n", f.Epoch, f.Round)
 		return nil
 	}
 	if flag, err := c.Aggreator.AddFinishVote(f); err != nil {
@@ -584,7 +700,9 @@ func (c *Core) handleHalt(h *Halt) error {
 		if err := c.handleOutput(h.Epoch, h.BlockHash); err != nil {
 			return err
 		}
+		c.fastpathlock.Lock()
 		c.HaltFlags[h.Epoch] = struct{}{}
+		c.fastpathlock.Unlock()
 		c.advanceNextEpoch(h.Epoch + 1)
 	}
 
@@ -633,6 +751,10 @@ func (c *Core) advanceNextEpoch(epoch int64) {
 }
 
 func (c *Core) Run() {
+	if c.Name < core.NodeID(c.Parameters.Faults) {
+		logger.Debug.Printf("Node %d is faulty\n", c.Name)
+		return
+	}
 
 	//first proposal
 	// block := c.generatorBlock(c.Epoch)
@@ -678,7 +800,14 @@ func (c *Core) Run() {
 					go c.handleBlockMessage(msg.(*BlockMessage))
 				case VoteforBlockType:
 					go c.handleVoteForBlock(msg.(*VoteforBlock))
-
+				case FastProposalType:
+					err = c.handleFastProposal(msg.(*FastProposal))
+				case FastShareType:
+					err = c.handleFastShare(msg.(*FastShare))
+				case FastCommitType:
+					err = c.handleFastCommit(msg.(*FastCommit))
+				case FastHaltType:
+					err = c.handleFastHalt(msg.(*FastHalt))
 				}
 			}
 		default:
