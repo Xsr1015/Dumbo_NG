@@ -1,8 +1,8 @@
 {
     "key": {
-        "name": "dcz",
-        "path": "/root/.ssh/id_rsa",
-        "accesskey": "/root/.aliyun/access.json"
+        "name": "xsr",
+        "path": "/home/xsr/.ssh/Aliyun",
+        "accesskey": "/home/xsr/.aliyun/access.json"
     },
     "ports": {
         "consensus": 8000
@@ -13,6 +13,7 @@
             "eu-central-1",
             "ap-northeast-2",
             "ap-southeast-1",
+            "us-west-1",
             "us-east-1"
         ]
     }

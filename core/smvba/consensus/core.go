@@ -633,7 +633,10 @@ func (c *Core) advanceNextEpoch(epoch int64) {
 }
 
 func (c *Core) Run() {
-
+	if c.Name < core.NodeID(c.Parameters.Faults) {
+		logger.Debug.Printf("Node %d is faulty\n", c.Name)
+		return
+	}
 	//first proposal
 	// block := c.generatorBlock(c.Epoch)
 	// proposal, _ := NewSPBProposal(c.Name, block, c.Epoch, 0, SPB_ONE_PHASE, c.SigService)
